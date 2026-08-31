@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-DATA_PATH = "Sleep vs GPA in College/college_sleep_and_gpa.csv"
-REFERENCE_PATH = "Sleep vs GPA in College/study_cohort_reference.csv"
+DATA_PATH = "college_sleep_and_gpa.csv"
+REFERENCE_PATH = "study_cohort_reference.csv"
 
 df = pd.read_csv(DATA_PATH)
 ref = pd.read_csv(REFERENCE_PATH)
