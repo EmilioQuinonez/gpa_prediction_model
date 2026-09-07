@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, root_mean_squared_error
 
 DATA_PATH = "college_sleep_and_gpa.csv"
 REFERENCE_PATH = "study_cohort_reference.csv"
@@ -159,27 +162,34 @@ df_eliminado = pd.get_dummies(df_eliminado, columns=cols_categoricas, drop_first
 print("------- Columnas después del encoding -------")
 print(df_imputado.columns.tolist())
 
-# Dividimos en train (80%) y test (20%), revolvemos los índices
-# con una semilla fija para que sea reproducible y cortamos en 80%.
-def train_test_split(data, train_frac=0.8, seed=1):
+# Dividimos en train (70%), validate (15%) y test (15%), revolvemos los
+# índices con una semilla fija para que sea reproducible y cortamos en
+# 70% y 85%.
+def train_val_test_split(data, train_frac=0.7, val_frac=0.15, seed=1):
     np.random.seed(seed)
     indices = np.random.permutation(len(data))
-    corte = int(len(data) * train_frac)
-    idx_train = indices[:corte]
-    idx_test = indices[corte:]
-    return data.iloc[idx_train].reset_index(drop=True), data.iloc[idx_test].reset_index(drop=True)
+    corte_train = int(len(data) * train_frac)
+    corte_val = int(len(data) * (train_frac + val_frac))
+    idx_train = indices[:corte_train]
+    idx_val = indices[corte_train:corte_val]
+    idx_test = indices[corte_val:]
+    return (
+        data.iloc[idx_train].reset_index(drop=True),
+        data.iloc[idx_val].reset_index(drop=True),
+        data.iloc[idx_test].reset_index(drop=True),
+    )
 
 # Eliminamos el student_uid ya que no lo vamos a ocupar más
 df_imputado = df_imputado.drop(columns=["student_uid"])
 df_eliminado = df_eliminado.drop(columns=["student_uid"])
 
-train_imputado, test_imputado = train_test_split(df_imputado)
-train_eliminado, test_eliminado = train_test_split(df_eliminado)
+train_imputado, val_imputado, test_imputado = train_val_test_split(df_imputado)
+train_eliminado, val_eliminado, test_eliminado = train_val_test_split(df_eliminado)
 
 print("------- Tamaños del split (df_imputado) -------")
-print("Train:", train_imputado.shape[0], "Test:", test_imputado.shape[0])
+print("Train:", train_imputado.shape[0], "Validate:", val_imputado.shape[0], "Test:", test_imputado.shape[0])
 print("------- Tamaños del split (df_eliminado) -------")
-print("Train:", train_eliminado.shape[0], "Test:", test_eliminado.shape[0])
+print("Train:", train_eliminado.shape[0], "Validate:", val_eliminado.shape[0], "Test:", test_eliminado.shape[0])
 
 # ------- Regresión lineal múltiple -------
 
@@ -222,12 +232,14 @@ def evaluar_regresion(df_eval, columnas_x, columna_y, beta, b):
     rmse = np.sqrt(ss_res / len(y))
     return r2, rmse
 
-# Creamos una funcion para poder evaluar ambos data sets
-def entrenar_regresion(train_df, test_df, target="term_gpa", alpha=0.001, max_epochs=10000, r2_target=0.95):
+# Creamos una funcion para poder evaluar los tres data sets (train/validate/test)
+def entrenar_regresion(train_df, val_df, test_df, target="term_gpa", alpha=0.001, max_epochs=10000, r2_target=0.95):
     columnas_x = train_df.columns.drop(target).tolist()
 
     X_train = train_df[columnas_x].to_numpy(dtype=float)
     y_train = train_df[target].to_numpy(dtype=float)
+    X_val = val_df[columnas_x].to_numpy(dtype=float)
+    y_val = val_df[target].to_numpy(dtype=float)
     X_test = test_df[columnas_x].to_numpy(dtype=float)
     y_test = test_df[target].to_numpy(dtype=float)
 
@@ -236,6 +248,7 @@ def entrenar_regresion(train_df, test_df, target="term_gpa", alpha=0.001, max_ep
     desviacion_train = np.where(desviacion_train == 0, 1, desviacion_train)
 
     X_train_scaled = scaling(X_train, media_train, desviacion_train)
+    X_val_scaled = scaling(X_val, media_train, desviacion_train)
     X_test_scaled = scaling(X_test, media_train, desviacion_train)
 
     beta = np.zeros(X_train_scaled.shape[1])
@@ -258,6 +271,8 @@ def entrenar_regresion(train_df, test_df, target="term_gpa", alpha=0.001, max_ep
 
     train_df_scaled = pd.DataFrame(X_train_scaled, columns=columnas_x)
     train_df_scaled[target] = y_train
+    val_df_scaled = pd.DataFrame(X_val_scaled, columns=columnas_x)
+    val_df_scaled[target] = y_val
     test_df_scaled = pd.DataFrame(X_test_scaled, columns=columnas_x)
     test_df_scaled[target] = y_test
 
@@ -265,19 +280,21 @@ def entrenar_regresion(train_df, test_df, target="term_gpa", alpha=0.001, max_ep
         "beta": beta, "b": b, "epoch": epoch,
         "cost_history": cost_history, "r2_history": r2_history,
         "columnas_x": columnas_x, "target": target,
-        "train_df": train_df_scaled, "test_df": test_df_scaled,
+        "train_df": train_df_scaled, "val_df": val_df_scaled, "test_df": test_df_scaled,
     }
 
 # Cargamos los data sets a la funcion
-modelo_imputado = entrenar_regresion(train_imputado, test_imputado)
-modelo_eliminado = entrenar_regresion(train_eliminado, test_eliminado)
+modelo_imputado = entrenar_regresion(train_imputado, val_imputado, test_imputado)
+modelo_eliminado = entrenar_regresion(train_eliminado, val_eliminado, test_eliminado)
 
 for nombre, modelo in [("df_imputado", modelo_imputado), ("df_eliminado", modelo_eliminado)]:
     r2_train, rmse_train = evaluar_regresion(modelo["train_df"], modelo["columnas_x"], modelo["target"], modelo["beta"], modelo["b"])
+    r2_val, rmse_val = evaluar_regresion(modelo["val_df"], modelo["columnas_x"], modelo["target"], modelo["beta"], modelo["b"])
     r2_test, rmse_test = evaluar_regresion(modelo["test_df"], modelo["columnas_x"], modelo["target"], modelo["beta"], modelo["b"])
     print(f"------- Resultados {nombre} (terminó en la época {modelo['epoch']}) -------")
-    print(f"Train -> R2: {r2_train:.3f}  RMSE: {rmse_train:.3f}")
-    print(f"Test  -> R2: {r2_test:.3f}  RMSE: {rmse_test:.3f}")
+    print(f"Train    -> R2: {r2_train:.3f}  RMSE: {rmse_train:.3f}")
+    print(f"Validate -> R2: {r2_val:.3f}  RMSE: {rmse_val:.3f}")
+    print(f"Test     -> R2: {r2_test:.3f}  RMSE: {rmse_test:.3f}")
 
 # Gráfica del modelo: term_gpa predicho vs. term_gpa real (sobre test).
 # Entre más cerca estén los puntos de la diagonal, mejor predice el modelo.
@@ -342,4 +359,66 @@ axes[1, 1].grid(True)
 
 fig.tight_layout()
 plt.savefig("curvas_entrenamiento.png", dpi=150)
+
+# ------- Comparación con modelos de librerías (framework) -------
+# Reutilizamos los mismos splits train/val/test ya calculados (train_imputado,
+# val_imputado, test_imputado, etc.) para comparar sobre exactamente las
+# mismas filas que usó el modelo hecho a mano.
+#
+# LinearRegression: valida contra el modelo hecho a mano por descenso de gradiente.
+# RandomForest: explora si una relación no lineal capta más señal.
+
+def evaluar_framework(modelo, X, y):
+    y_pred = modelo.predict(X)
+    r2 = r2_score(y, y_pred)
+    rmse = root_mean_squared_error(y, y_pred)
+    return r2, rmse
+
+
+columnas_x = train_imputado.columns.drop("term_gpa").tolist()
+X_train, y_train = train_imputado[columnas_x], train_imputado["term_gpa"]
+X_val, y_val = val_imputado[columnas_x], val_imputado["term_gpa"]
+X_test, y_test = test_imputado[columnas_x], test_imputado["term_gpa"]
+
+print("------- Comparación framework: df_imputado -------")
+
+modelo_lineal_sk = LinearRegression()
+modelo_lineal_sk.fit(X_train, y_train)
+r2_train, rmse_train = evaluar_framework(modelo_lineal_sk, X_train, y_train)
+r2_val, rmse_val = evaluar_framework(modelo_lineal_sk, X_val, y_val)
+r2_test, rmse_test = evaluar_framework(modelo_lineal_sk, X_test, y_test)
+print("LinearRegression:")
+print(f"Train    -> R2: {r2_train:.3f}  RMSE: {rmse_train:.3f}")
+print(f"Validate -> R2: {r2_val:.3f}  RMSE: {rmse_val:.3f}")
+print(f"Test     -> R2: {r2_test:.3f}  RMSE: {rmse_test:.3f}")
+
+modelo_rf = RandomForestRegressor(n_estimators=300, random_state=1)
+modelo_rf.fit(X_train, y_train)
+r2_train, rmse_train = evaluar_framework(modelo_rf, X_train, y_train)
+r2_val, rmse_val = evaluar_framework(modelo_rf, X_val, y_val)
+r2_test, rmse_test = evaluar_framework(modelo_rf, X_test, y_test)
+print("RandomForest:")
+print(f"Train    -> R2: {r2_train:.3f}  RMSE: {rmse_train:.3f}")
+print(f"Validate -> R2: {r2_val:.3f}  RMSE: {rmse_val:.3f}")
+print(f"Test     -> R2: {r2_test:.3f}  RMSE: {rmse_test:.3f}")
+
+# Gráfica: term_gpa predicho vs. real (sobre test), LinearRegression vs RandomForest.
+fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+for ax, (nombre, modelo) in zip(axes, [("LinearRegression", modelo_lineal_sk), ("RandomForest", modelo_rf)]):
+    y_pred = modelo.predict(X_test)
+    r2_test, _ = evaluar_framework(modelo, X_test, y_test)
+
+    ax.scatter(y_test, y_pred, s=15, alpha=0.5)
+    lims = [min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())]
+    ax.plot(lims, lims, color="black", linestyle="--", label="predicción perfecta")
+    ax.text(0.05, 0.95, f"R2 = {r2_test:.3f}", transform=ax.transAxes, va="top",
+            bbox=dict(facecolor="white", edgecolor="black"))
+    ax.set_xlabel("term_gpa real")
+    ax.set_ylabel("term_gpa predicho")
+    ax.set_title(f"{nombre} (test)")
+    ax.legend()
+    ax.grid(True)
+fig.tight_layout()
+plt.savefig("prediccion_vs_real_framework.png", dpi=150)
+
 
