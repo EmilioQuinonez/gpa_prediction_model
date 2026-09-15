@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, root_mean_squared_error
+from sklearn.model_selection import KFold, cross_val_score
 
 DATA_PATH = "college_sleep_and_gpa.csv"
 REFERENCE_PATH = "study_cohort_reference.csv"
@@ -319,43 +320,26 @@ for ax, (nombre, modelo) in zip(axes, [("df_imputado", modelo_imputado), ("df_el
 fig.tight_layout()
 plt.savefig("prediccion_vs_real.png", dpi=150)
 
-# Gráficas de costo y R2, completas y con zoom en las últimas épocas
-zoom_desde = int(len(modelo_imputado["cost_history"]) * 0.8)
-epocas_zoom = range(zoom_desde, len(modelo_imputado["cost_history"]))
+# Gráficas de costo y R2
+fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
 
-fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+axes[0].plot(modelo_imputado["cost_history"], label="df_imputado")
+axes[0].plot(modelo_eliminado["cost_history"], label="df_eliminado")
+axes[0].set_title("Costo")
+axes[0].set_xlabel("Épocas")
+axes[0].set_ylabel("Costo (MSE)")
+axes[0].legend()
+axes[0].grid(True)
+axes[0].set_ylim(0, 1)
 
-axes[0, 0].plot(modelo_imputado["cost_history"], label="df_imputado")
-axes[0, 0].plot(modelo_eliminado["cost_history"], label="df_eliminado")
-axes[0, 0].set_title("Costo (completo)")
-axes[0, 0].set_xlabel("Épocas")
-axes[0, 0].set_ylabel("Costo (MSE)")
-axes[0, 0].legend()
-axes[0, 0].grid(True)
-
-axes[0, 1].plot(epocas_zoom, modelo_imputado["cost_history"][zoom_desde:], label="df_imputado")
-axes[0, 1].plot(epocas_zoom, modelo_eliminado["cost_history"][zoom_desde:], label="df_eliminado")
-axes[0, 1].set_title(f"Costo (zoom, desde época {zoom_desde})")
-axes[0, 1].set_xlabel("Épocas")
-axes[0, 1].set_ylabel("Costo (MSE)")
-axes[0, 1].legend()
-axes[0, 1].grid(True)
-
-axes[1, 0].plot(modelo_imputado["r2_history"], label="df_imputado")
-axes[1, 0].plot(modelo_eliminado["r2_history"], label="df_eliminado")
-axes[1, 0].set_title("R2 (completo)")
-axes[1, 0].set_xlabel("Épocas")
-axes[1, 0].set_ylabel("R2")
-axes[1, 0].legend()
-axes[1, 0].grid(True)
-
-axes[1, 1].plot(epocas_zoom, modelo_imputado["r2_history"][zoom_desde:], label="df_imputado")
-axes[1, 1].plot(epocas_zoom, modelo_eliminado["r2_history"][zoom_desde:], label="df_eliminado")
-axes[1, 1].set_title(f"R2 (zoom, desde época {zoom_desde})")
-axes[1, 1].set_xlabel("Épocas")
-axes[1, 1].set_ylabel("R2")
-axes[1, 1].legend()
-axes[1, 1].grid(True)
+axes[1].plot(modelo_imputado["r2_history"], label="df_imputado")
+axes[1].plot(modelo_eliminado["r2_history"], label="df_eliminado")
+axes[1].set_title("R2")
+axes[1].set_xlabel("Épocas")
+axes[1].set_ylabel("R2")
+axes[1].legend()
+axes[1].grid(True)
+axes[1].set_ylim(0, 1)
 
 fig.tight_layout()
 plt.savefig("curvas_entrenamiento.png", dpi=150)
@@ -421,4 +405,77 @@ for ax, (nombre, modelo) in zip(axes, [("LinearRegression", modelo_lineal_sk), (
 fig.tight_layout()
 plt.savefig("prediccion_vs_real_framework.png", dpi=150)
 
+# ------- Regularización del RandomForest -------
+# Un RandomForest no tiene coeficientes beta que penalizar, es un ensamble
+# de árboles. Lo que se hizo fue limitar qué tan complejo puede ponerse cada 
+# árbol, por ejemplo con max_depth (profundidad máxima).
+# El RandomForest original sobreajusta fuerte (train 0.916 vs test 0.396),
+# así que buscamos el max_depth que mejor generaliza. El set de validación
+# por sí solo es chico (94 filas) y su R2 es ruidoso como criterio de
+# selección, así que elegimos max_depth con 5-fold cross-validation sobre
+# train+validation combinados (sin tocar test), y ya con ese max_depth
+# entrenamos sobre train para evaluar train/validate/test igual que los
+# demás modelos.
+
+X_trainval = pd.concat([X_train, X_val], axis=0)
+y_trainval = pd.concat([y_train, y_val], axis=0)
+kf_reg = KFold(n_splits=5, shuffle=True, random_state=1)
+
+max_depths_rf = [2, 3, 4, 5, 6, 8, 10, None]
+resultados_rf_reg = []
+for max_depth_rf in max_depths_rf:
+    scores_rf = cross_val_score(
+        RandomForestRegressor(n_estimators=300, random_state=1, max_depth=max_depth_rf),
+        X_trainval, y_trainval, cv=kf_reg, scoring="r2",
+    )
+    resultados_rf_reg.append((max_depth_rf, scores_rf.mean()))
+
+print("------- Búsqueda de max_depth para RandomForest (5-fold Cross Validation sobre train+validate) -------")
+for max_depth_rf, r2_cv_rf in resultados_rf_reg:
+    print(f"max_depth={str(max_depth_rf):>6} -> R2 Cross Validation (media 5 folds): {r2_cv_rf:.4f}")
+
+mejor_max_depth = max(resultados_rf_reg, key=lambda par: par[1])[0]
+print(f"Mejor max_depth (según Cross Validation): {mejor_max_depth}")
+
+modelo_rf_reg = RandomForestRegressor(n_estimators=300, random_state=1, max_depth=mejor_max_depth)
+modelo_rf_reg.fit(X_train, y_train)
+r2_train, rmse_train = evaluar_framework(modelo_rf_reg, X_train, y_train)
+r2_val, rmse_val = evaluar_framework(modelo_rf_reg, X_val, y_val)
+r2_test, rmse_test = evaluar_framework(modelo_rf_reg, X_test, y_test)
+print(f"------- RandomForest regularizado (max_depth={mejor_max_depth}), df_imputado -------")
+print(f"Train    -> R2: {r2_train:.3f}  RMSE: {rmse_train:.3f}")
+print(f"Validate -> R2: {r2_val:.3f}  RMSE: {rmse_val:.3f}")
+print(f"Test     -> R2: {r2_test:.3f}  RMSE: {rmse_test:.3f}")
+
+# Gráfica: R2 de Cross Validation contra max_depth, para justificar la elección.
+etiquetas_md = [str(md) for md, _ in resultados_rf_reg]
+fig, ax = plt.subplots(figsize=(7, 5))
+ax.plot(etiquetas_md, [r2 for _, r2 in resultados_rf_reg], marker="o")
+ax.axvline(str(mejor_max_depth), color="black", linestyle="--", label=f"max_depth elegido = {mejor_max_depth}")
+ax.set_xlabel("max_depth")
+ax.set_ylabel("R2 (media 5-fold Cross Validation, train+validate)")
+ax.set_title("Selección de max_depth para RandomForest")
+ax.legend()
+ax.grid(True)
+fig.tight_layout()
+plt.savefig("randomforest_max_depth_seleccion.png", dpi=150)
+
+# Gráfica: term_gpa predicho vs. real (test), RandomForest original vs regularizado.
+fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+for ax, (nombre, modelo) in zip(axes, [("RandomForest original", modelo_rf), (f"RandomForest (max_depth={mejor_max_depth})", modelo_rf_reg)]):
+    y_pred = modelo.predict(X_test)
+    r2_test_plot, _ = evaluar_framework(modelo, X_test, y_test)
+
+    ax.scatter(y_test, y_pred, s=15, alpha=0.5)
+    lims = [min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())]
+    ax.plot(lims, lims, color="black", linestyle="--", label="predicción perfecta")
+    ax.text(0.05, 0.95, f"R2 = {r2_test_plot:.3f}", transform=ax.transAxes, va="top",
+            bbox=dict(facecolor="white", edgecolor="black"))
+    ax.set_xlabel("term_gpa real")
+    ax.set_ylabel("term_gpa predicho")
+    ax.set_title(f"{nombre} (test)")
+    ax.legend()
+    ax.grid(True)
+fig.tight_layout()
+plt.savefig("prediccion_vs_real_randomforest_reg.png", dpi=150)
 
